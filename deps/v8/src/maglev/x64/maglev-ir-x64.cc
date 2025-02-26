@@ -27,7 +27,7 @@ namespace maglev {
 // ---
 
 void InlinedAllocation::SetValueLocationConstraints() {
-  UseRegister(allocation_block());
+  UseRegister(allocation_block_input());
   if (offset() == 0) {
     DefineSameAsFirst(this);
   } else {
@@ -39,7 +39,7 @@ void InlinedAllocation::GenerateCode(MaglevAssembler* masm,
                                      const ProcessingState& state) {
   if (offset() != 0) {
     __ leaq(ToRegister(result()),
-            Operand(ToRegister(allocation_block()), offset()));
+            Operand(ToRegister(allocation_block_input()), offset()));
   }
 }
 
@@ -81,12 +81,11 @@ void LoadTypedArrayLength::GenerateCode(MaglevAssembler* masm,
   }
   __ LoadBoundedSizeFromObject(result_register, object,
                                JSTypedArray::kRawByteLengthOffset);
-  int element_size = ElementsKindSize(elements_kind_);
-  if (element_size > 1) {
+  int shift_size = ElementsKindToShiftSize(elements_kind_);
+  if (shift_size > 0) {
     // TODO(leszeks): Merge this shift with the one in LoadBoundedSize.
-    DCHECK(element_size == 2 || element_size == 4 || element_size == 8);
-    __ shrq(result_register,
-            Immediate(base::bits::CountTrailingZeros(element_size)));
+    DCHECK(shift_size == 1 || shift_size == 2 || shift_size == 3);
+    __ shrq(result_register, Immediate(shift_size));
   }
 }
 
@@ -120,6 +119,21 @@ void CheckJSDataViewBounds::GenerateCode(MaglevAssembler* masm,
 
 int CheckedObjectToIndex::MaxCallStackArgs() const {
   return MaglevAssembler::ArgumentStackSlotsForCFunctionCall(1);
+}
+
+void CheckedIntPtrToInt32::SetValueLocationConstraints() {
+  UseRegister(input());
+  DefineSameAsFirst(this);
+}
+
+void CheckedIntPtrToInt32::GenerateCode(MaglevAssembler* masm,
+                                        const ProcessingState& state) {
+  Register input_reg = ToRegister(input());
+
+  // Copy input(32 bit) to scratch. Is input equal(64 bit) to scratch?
+  __ movl(kScratchRegister, input_reg);
+  __ cmpq(kScratchRegister, input_reg);
+  __ EmitEagerDeoptIf(not_equal, DeoptimizeReason::kNotInt32, this);
 }
 
 int BuiltinStringFromCharCode::MaxCallStackArgs() const {
@@ -710,8 +724,7 @@ namespace {
 enum class ReduceInterruptBudgetType { kLoop, kReturn };
 
 void HandleInterruptsAndTiering(MaglevAssembler* masm, ZoneLabelRef done,
-                                Node* node, ReduceInterruptBudgetType type,
-                                Register scratch0) {
+                                Node* node, ReduceInterruptBudgetType type) {
   // For loops, first check for interrupts. Don't do this for returns, as we
   // can't lazy deopt to the end of a return.
   if (type == ReduceInterruptBudgetType::kLoop) {
@@ -752,17 +765,13 @@ void HandleInterruptsAndTiering(MaglevAssembler* masm, ZoneLabelRef done,
 }
 
 void GenerateReduceInterruptBudget(MaglevAssembler* masm, Node* node,
+                                   Register feedback_cell,
                                    ReduceInterruptBudgetType type, int amount) {
   MaglevAssembler::TemporaryRegisterScope temps(masm);
-  Register scratch = temps.Acquire();
-  __ movq(scratch, MemOperand(rbp, StandardFrameConstants::kFunctionOffset));
-  __ LoadTaggedField(scratch,
-                     FieldOperand(scratch, JSFunction::kFeedbackCellOffset));
-  __ subl(FieldOperand(scratch, FeedbackCell::kInterruptBudgetOffset),
+  __ subl(FieldOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset),
           Immediate(amount));
   ZoneLabelRef done(masm);
-  __ JumpToDeferredIf(less, HandleInterruptsAndTiering, done, node, type,
-                      scratch);
+  __ JumpToDeferredIf(less, HandleInterruptsAndTiering, done, node, type);
   __ bind(*done);
 }
 
@@ -770,22 +779,23 @@ void GenerateReduceInterruptBudget(MaglevAssembler* masm, Node* node,
 
 int ReduceInterruptBudgetForLoop::MaxCallStackArgs() const { return 1; }
 void ReduceInterruptBudgetForLoop::SetValueLocationConstraints() {
-  set_temporaries_needed(1);
+  UseRegister(feedback_cell());
 }
 void ReduceInterruptBudgetForLoop::GenerateCode(MaglevAssembler* masm,
                                                 const ProcessingState& state) {
-  GenerateReduceInterruptBudget(masm, this, ReduceInterruptBudgetType::kLoop,
-                                amount());
+  GenerateReduceInterruptBudget(masm, this, ToRegister(feedback_cell()),
+                                ReduceInterruptBudgetType::kLoop, amount());
 }
 
 int ReduceInterruptBudgetForReturn::MaxCallStackArgs() const { return 1; }
 void ReduceInterruptBudgetForReturn::SetValueLocationConstraints() {
+  UseRegister(feedback_cell());
   set_temporaries_needed(1);
 }
 void ReduceInterruptBudgetForReturn::GenerateCode(
     MaglevAssembler* masm, const ProcessingState& state) {
-  GenerateReduceInterruptBudget(masm, this, ReduceInterruptBudgetType::kReturn,
-                                amount());
+  GenerateReduceInterruptBudget(masm, this, ToRegister(feedback_cell()),
+                                ReduceInterruptBudgetType::kReturn, amount());
 }
 
 // ---
@@ -807,7 +817,7 @@ void Return::GenerateCode(MaglevAssembler* masm, const ProcessingState& state) {
   Register actual_params_size = r8;
 
   // Compute the size of the actual parameters + receiver (in bytes).
-  // TODO(leszeks): Consider making this an input into Return to re-use the
+  // TODO(leszeks): Consider making this an input into Return to reuse the
   // incoming argc's register (if it's still valid).
   __ movq(actual_params_size,
           MemOperand(rbp, StandardFrameConstants::kArgCOffset));

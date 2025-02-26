@@ -884,7 +884,7 @@ void SLPTree::ForEach(FunctionType callback) {
 
 //////////////////////////////////////////////////////
 
-Revectorizer::Revectorizer(Zone* zone, Graph* graph, MachineGraph* mcgraph,
+Revectorizer::Revectorizer(Zone* zone, TFGraph* graph, MachineGraph* mcgraph,
                            SourcePositionTable* source_positions)
     : zone_(zone),
       graph_(graph),
@@ -1060,12 +1060,12 @@ Node* Revectorizer::VectorizeTree(PackNode* pnode) {
         // shuffling across 128-bit lane.
         if (wasm::SimdShuffle::TryMatchSplat<4>(shuffle, &index)) {
           new_op = mcgraph_->machine()->LoadTransform(
-              MemoryAccessKind::kProtected,
+              MemoryAccessKind::kProtectedByTrapHandler,
               LoadTransformation::kS256Load32Splat);
           offset = index * 4;
         } else if (wasm::SimdShuffle::TryMatchSplat<2>(shuffle, &index)) {
           new_op = mcgraph_->machine()->LoadTransform(
-              MemoryAccessKind::kProtected,
+              MemoryAccessKind::kProtectedByTrapHandler,
               LoadTransformation::kS256Load64Splat);
           offset = index * 8;
         } else {

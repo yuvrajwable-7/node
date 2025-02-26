@@ -45,6 +45,8 @@ namespace module_decoder_unittest {
 #define NOP_BODY 2, 0, kExprNop
 
 #define SIG_ENTRY_i_i SIG_ENTRY_x_x(kI32Code, kI32Code)
+#define SIG_ENTRY_k_i SIG_ENTRY_x_x(kContRefCode, kI32Code)
+#define SIG_ENTRY_i_k SIG_ENTRY_x_x(kI32Code, kContRefCode)
 
 #define UNKNOWN_SECTION(size) 0, U32V_1(size + 5), ADD_COUNT('l', 'u', 'l', 'z')
 #define TYPE_SECTION(count, ...) SECTION(Type, U32V_1(count), __VA_ARGS__)
@@ -163,6 +165,8 @@ namespace module_decoder_unittest {
     }                                                        \
   } while (false)
 
+using Idx = ModuleTypeIndex;
+
 static size_t SizeOfVarInt(size_t value) {
   size_t size = 0;
   do {
@@ -185,6 +189,8 @@ struct ValueTypePair {
     {kExternRefCode, kWasmExternRef},              // --
     {kNoExternCode, kWasmNullExternRef},           // --
     {kNoExnCode, kWasmNullExnRef},                 // --
+    {kContRefCode, kWasmContRef},                  // --
+    {kNoContCode, kWasmNullContRef},               // --
     {kAnyRefCode, kWasmAnyRef},                    // --
     {kEqRefCode, kWasmEqRef},                      // --
     {kI31RefCode, kWasmI31Ref},                    // --
@@ -211,13 +217,17 @@ class WasmModuleVerifyTest : public TestWithIsolateAndZone {
     if (size > 0) {
       memcpy(temp + sizeof(header), module_bytes.begin(), size);
     }
-    ModuleResult result = DecodeWasmModule(
-        enabled_features_, base::VectorOf(temp, total), false, kWasmOrigin);
+    WasmDetectedFeatures unused_detected_features;
+    ModuleResult result =
+        DecodeWasmModule(enabled_features_, base::VectorOf(temp, total), false,
+                         kWasmOrigin, &unused_detected_features);
     delete[] temp;
     return result;
   }
   ModuleResult DecodeModuleNoHeader(base::Vector<const uint8_t> bytes) {
-    return DecodeWasmModule(enabled_features_, bytes, false, kWasmOrigin);
+    WasmDetectedFeatures unused_detected_features;
+    return DecodeWasmModule(enabled_features_, bytes, false, kWasmOrigin,
+                            &unused_detected_features);
   }
 };
 
@@ -1072,8 +1082,7 @@ TEST_F(WasmModuleVerifyTest, NoSupertypeSupertype) {
               0xff, 0xff, 0xff, 0xff, 0x0f,  // supertype = "kNoSuperType"
               kWasmArrayTypeCode, kI32Code, 0)};
 
-  EXPECT_FAILURE_WITH_MSG(
-      no_supertype, "is greater than the maximum number of type definitions");
+  EXPECT_FAILURE_WITH_MSG(no_supertype, "type 0: invalid supertype 4294967295");
 }
 
 TEST_F(WasmModuleVerifyTest, NonSpecifiedFinalType) {
@@ -1255,13 +1264,13 @@ TEST_F(WasmModuleVerifyTest, MultipleSignatures) {
   EXPECT_OK(result);
   EXPECT_EQ(3u, result.value()->types.size());
   if (result.value()->types.size() == 3) {
-    EXPECT_EQ(0u, result.value()->signature(0)->return_count());
-    EXPECT_EQ(1u, result.value()->signature(1)->return_count());
-    EXPECT_EQ(1u, result.value()->signature(2)->return_count());
+    EXPECT_EQ(0u, result.value()->signature(Idx{0})->return_count());
+    EXPECT_EQ(1u, result.value()->signature(Idx{1})->return_count());
+    EXPECT_EQ(1u, result.value()->signature(Idx{2})->return_count());
 
-    EXPECT_EQ(0u, result.value()->signature(0)->parameter_count());
-    EXPECT_EQ(1u, result.value()->signature(1)->parameter_count());
-    EXPECT_EQ(2u, result.value()->signature(2)->parameter_count());
+    EXPECT_EQ(0u, result.value()->signature(Idx{0})->parameter_count());
+    EXPECT_EQ(1u, result.value()->signature(Idx{1})->parameter_count());
+    EXPECT_EQ(2u, result.value()->signature(Idx{2})->parameter_count());
   }
 
   EXPECT_OFF_END_FAILURE(data, 1);
@@ -1292,11 +1301,11 @@ TEST_F(WasmModuleVerifyTest, CanonicalTypeIds) {
   EXPECT_EQ(7u, module->isorecursive_canonical_type_ids.size());
 
   static constexpr uint32_t kBase = TypeCanonicalizer::kNumberOfPredefinedTypes;
-  EXPECT_EQ(kBase + 0u, module->isorecursive_canonical_type_ids[0]);
-  EXPECT_EQ(kBase + 1u, module->isorecursive_canonical_type_ids[1]);
-  EXPECT_EQ(kBase + 2u, module->isorecursive_canonical_type_ids[2]);
-  EXPECT_EQ(kBase + 1u, module->isorecursive_canonical_type_ids[3]);
-  EXPECT_EQ(kBase + 3u, module->isorecursive_canonical_type_ids[4]);
+  EXPECT_EQ(kBase + 0u, module->isorecursive_canonical_type_ids[0].index);
+  EXPECT_EQ(kBase + 1u, module->isorecursive_canonical_type_ids[1].index);
+  EXPECT_EQ(kBase + 2u, module->isorecursive_canonical_type_ids[2].index);
+  EXPECT_EQ(kBase + 1u, module->isorecursive_canonical_type_ids[3].index);
+  EXPECT_EQ(kBase + 3u, module->isorecursive_canonical_type_ids[4].index);
 
   EXPECT_EQ(TypeCanonicalizer::kPredefinedArrayI16Index,
             module->isorecursive_canonical_type_ids[5]);
@@ -2041,7 +2050,7 @@ TEST_F(WasmModuleVerifyTest, TypedFunctionTable) {
 
   ModuleResult result = DecodeModule(base::ArrayVector(data));
   EXPECT_OK(result);
-  EXPECT_EQ(ValueType::RefNull(0), result.value()->tables[0].type);
+  EXPECT_EQ(ValueType::RefNull(Idx{0}), result.value()->tables[0].type);
 }
 
 TEST_F(WasmModuleVerifyTest, NullableTableIllegalInitializer) {
@@ -2096,7 +2105,7 @@ TEST_F(WasmModuleVerifyTest, TableWithInitializer) {
       SECTION(Code, ENTRY_COUNT(1), NOP_BODY)};
   ModuleResult result = DecodeModule(base::ArrayVector(data));
   EXPECT_OK(result);
-  EXPECT_EQ(ValueType::RefNull(0), result.value()->tables[0].type);
+  EXPECT_EQ(ValueType::RefNull(Idx{0}), result.value()->tables[0].type);
 }
 
 TEST_F(WasmModuleVerifyTest, NonNullableTable) {
@@ -2113,7 +2122,7 @@ TEST_F(WasmModuleVerifyTest, NonNullableTable) {
       SECTION(Code, ENTRY_COUNT(1), NOP_BODY)};
   ModuleResult result = DecodeModule(base::ArrayVector(data));
   EXPECT_OK(result);
-  EXPECT_EQ(ValueType::Ref(0), result.value()->tables[0].type);
+  EXPECT_EQ(ValueType::Ref(Idx{0}), result.value()->tables[0].type);
 }
 
 TEST_F(WasmModuleVerifyTest, NonNullableTableNoInitializer) {
@@ -2226,6 +2235,7 @@ TEST_F(WasmSignatureDecodeTest, Ok_v_v) {
 TEST_F(WasmSignatureDecodeTest, Ok_t_v) {
   WASM_FEATURE_SCOPE(stringref);
   WASM_FEATURE_SCOPE(exnref);
+  WASM_FEATURE_SCOPE(wasmfx);
   for (size_t i = 0; i < arraysize(kValueTypes); i++) {
     ValueTypePair ret_type = kValueTypes[i];
     const uint8_t data[] = {SIG_ENTRY_x(ret_type.code)};
@@ -2242,6 +2252,7 @@ TEST_F(WasmSignatureDecodeTest, Ok_t_v) {
 TEST_F(WasmSignatureDecodeTest, Ok_v_t) {
   WASM_FEATURE_SCOPE(stringref);
   WASM_FEATURE_SCOPE(exnref);
+  WASM_FEATURE_SCOPE(wasmfx);
   for (size_t i = 0; i < arraysize(kValueTypes); i++) {
     ValueTypePair param_type = kValueTypes[i];
     const uint8_t data[] = {SIG_ENTRY_v_x(param_type.code)};
@@ -2258,6 +2269,7 @@ TEST_F(WasmSignatureDecodeTest, Ok_v_t) {
 TEST_F(WasmSignatureDecodeTest, Ok_t_t) {
   WASM_FEATURE_SCOPE(stringref);
   WASM_FEATURE_SCOPE(exnref);
+  WASM_FEATURE_SCOPE(wasmfx);
   for (size_t i = 0; i < arraysize(kValueTypes); i++) {
     ValueTypePair ret_type = kValueTypes[i];
     for (size_t j = 0; j < arraysize(kValueTypes); j++) {
@@ -2278,6 +2290,7 @@ TEST_F(WasmSignatureDecodeTest, Ok_t_t) {
 TEST_F(WasmSignatureDecodeTest, Ok_i_tt) {
   WASM_FEATURE_SCOPE(stringref);
   WASM_FEATURE_SCOPE(exnref);
+  WASM_FEATURE_SCOPE(wasmfx);
   for (size_t i = 0; i < arraysize(kValueTypes); i++) {
     ValueTypePair p0_type = kValueTypes[i];
     for (size_t j = 0; j < arraysize(kValueTypes); j++) {
@@ -2300,6 +2313,7 @@ TEST_F(WasmSignatureDecodeTest, Ok_i_tt) {
 TEST_F(WasmSignatureDecodeTest, Ok_tt_tt) {
   WASM_FEATURE_SCOPE(stringref);
   WASM_FEATURE_SCOPE(exnref);
+  WASM_FEATURE_SCOPE(wasmfx);
   for (size_t i = 0; i < arraysize(kValueTypes); i++) {
     ValueTypePair p0_type = kValueTypes[i];
     for (size_t j = 0; j < arraysize(kValueTypes); j++) {
@@ -3066,11 +3080,23 @@ TEST_F(WasmModuleVerifyTest, SourceMappingURLSection) {
       SECTION_SRC_MAP('s', 'r', 'c', '/', 'x', 'y', 'z', '.', 'c')};
   ModuleResult result = DecodeModuleNoHeader(base::ArrayVector(data));
   EXPECT_TRUE(result.ok());
-  EXPECT_EQ(WasmDebugSymbols::Type::SourceMap,
-            result.value()->debug_symbols.type);
+  EXPECT_EQ(3u, result.value()->debug_symbols.size());
+  EXPECT_EQ(
+      WasmDebugSymbols::Type::SourceMap,
+      result.value()->debug_symbols[WasmDebugSymbols::Type::SourceMap].type);
+  EXPECT_EQ(WasmDebugSymbols::Type::None,
+            result.value()
+                ->debug_symbols[WasmDebugSymbols::Type::EmbeddedDWARF]
+                .type);
+  EXPECT_EQ(WasmDebugSymbols::Type::None,
+            result.value()
+                ->debug_symbols[WasmDebugSymbols::Type::ExternalDWARF]
+                .type);
   ModuleWireBytes wire_bytes(base::ArrayVector(data));
-  WasmName external_url =
-      wire_bytes.GetNameOrNull(result.value()->debug_symbols.external_url);
+  WasmName external_url = wire_bytes.GetNameOrNull(
+      result.value()
+          ->debug_symbols[WasmDebugSymbols::Type::SourceMap]
+          .external_url);
   EXPECT_EQ("src/xyz.c", std::string(external_url.data(), external_url.size()));
 }
 
@@ -3080,8 +3106,12 @@ TEST_F(WasmModuleVerifyTest, BadSourceMappingURLSection) {
       SECTION_SRC_MAP('s', 'r', 'c', '/', 'x', 0xff, 'z', '.', 'c')};
   ModuleResult result = DecodeModuleNoHeader(base::ArrayVector(data));
   EXPECT_TRUE(result.ok());
-  EXPECT_EQ(WasmDebugSymbols::Type::None, result.value()->debug_symbols.type);
-  EXPECT_EQ(0u, result.value()->debug_symbols.external_url.length());
+  EXPECT_EQ(3u, result.value()->debug_symbols.size());
+  for (size_t i = 0; i < result.value()->debug_symbols.size(); ++i) {
+    EXPECT_EQ(WasmDebugSymbols::Type::None,
+              result.value()->debug_symbols[i].type);
+    EXPECT_EQ(0u, result.value()->debug_symbols[i].external_url.length());
+  }
 }
 
 TEST_F(WasmModuleVerifyTest, MultipleSourceMappingURLSections) {
@@ -3090,11 +3120,22 @@ TEST_F(WasmModuleVerifyTest, MultipleSourceMappingURLSections) {
                                  SECTION_SRC_MAP('p', 'q', 'r')};
   ModuleResult result = DecodeModuleNoHeader(base::ArrayVector(data));
   EXPECT_TRUE(result.ok());
-  EXPECT_EQ(WasmDebugSymbols::Type::SourceMap,
-            result.value()->debug_symbols.type);
+  EXPECT_EQ(
+      WasmDebugSymbols::Type::SourceMap,
+      result.value()->debug_symbols[WasmDebugSymbols::Type::SourceMap].type);
+  EXPECT_EQ(WasmDebugSymbols::Type::None,
+            result.value()
+                ->debug_symbols[WasmDebugSymbols::Type::EmbeddedDWARF]
+                .type);
+  EXPECT_EQ(WasmDebugSymbols::Type::None,
+            result.value()
+                ->debug_symbols[WasmDebugSymbols::Type::ExternalDWARF]
+                .type);
   ModuleWireBytes wire_bytes(base::ArrayVector(data));
-  WasmName external_url =
-      wire_bytes.GetNameOrNull(result.value()->debug_symbols.external_url);
+  WasmName external_url = wire_bytes.GetNameOrNull(
+      result.value()
+          ->debug_symbols[WasmDebugSymbols::Type::SourceMap]
+          .external_url);
   EXPECT_EQ("abc", std::string(external_url.data(), external_url.size()));
 }
 
@@ -3145,7 +3186,6 @@ TEST_F(WasmModuleVerifyTest, ActiveElementSegmentWithElements) {
 }
 
 TEST_F(WasmModuleVerifyTest, Table64ActiveElementSegmentWithElements) {
-  WASM_FEATURE_SCOPE(memory64);
   for (bool enable_table64 : {false, true}) {
     for (bool use_table64 : {false, true}) {
       uint8_t const_opcode = use_table64 ? kExprI64Const : kExprI32Const;
@@ -3364,20 +3404,21 @@ TEST_F(WasmModuleVerifyTest, OutOfBoundsTypeInGlobal) {
 }
 
 TEST_F(WasmModuleVerifyTest, OutOfBoundsTypeInType) {
-  static const uint8_t data[] = {SECTION(
-      Type, ENTRY_COUNT(1),
-      WASM_STRUCT_DEF(FIELD_COUNT(1),
-                      STRUCT_FIELD(WASM_REF_TYPE(ValueType::Ref(1)), true)))};
+  static const uint8_t data[] = {
+      SECTION(Type, ENTRY_COUNT(1),
+              WASM_STRUCT_DEF(
+                  FIELD_COUNT(1),
+                  STRUCT_FIELD(WASM_REF_TYPE(ValueType::Ref(Idx{1})), true)))};
   ModuleResult result = DecodeModule(base::ArrayVector(data));
   EXPECT_NOT_OK(result, "Type index 1 is out of bounds");
 }
 
 TEST_F(WasmModuleVerifyTest, RecursiveTypeOutsideRecursiveGroup) {
-  static const uint8_t data[] = {
-      SECTION(Type, ENTRY_COUNT(1),
-              WASM_STRUCT_DEF(
-                  FIELD_COUNT(1),
-                  STRUCT_FIELD(WASM_REF_TYPE(ValueType::RefNull(0)), true)))};
+  static const uint8_t data[] = {SECTION(
+      Type, ENTRY_COUNT(1),
+      WASM_STRUCT_DEF(
+          FIELD_COUNT(1),
+          STRUCT_FIELD(WASM_REF_TYPE(ValueType::RefNull(Idx{0})), true)))};
   ModuleResult result = DecodeModule(base::ArrayVector(data));
   EXPECT_OK(result);
 }
@@ -3388,7 +3429,7 @@ TEST_F(WasmModuleVerifyTest, OutOfBoundsSupertype) {
               kWasmSubtypeCode, ENTRY_COUNT(1), 1,
               WASM_STRUCT_DEF(FIELD_COUNT(1), STRUCT_FIELD(kI32Code, true)))};
   ModuleResult result = DecodeModule(base::ArrayVector(data));
-  EXPECT_NOT_OK(result, "type 0: supertype 1 out of bounds");
+  EXPECT_NOT_OK(result, "type 0: invalid supertype 1");
 }
 
 TEST_F(WasmModuleVerifyTest, ForwardSupertypeSameType) {
@@ -3397,7 +3438,7 @@ TEST_F(WasmModuleVerifyTest, ForwardSupertypeSameType) {
               kWasmSubtypeCode, ENTRY_COUNT(1), 0,
               WASM_STRUCT_DEF(FIELD_COUNT(1), STRUCT_FIELD(kI32Code, true)))};
   ModuleResult result = DecodeModule(base::ArrayVector(data));
-  EXPECT_NOT_OK(result, "type 0: forward-declared supertype 0");
+  EXPECT_NOT_OK(result, "type 0: invalid supertype 0");
 }
 
 TEST_F(WasmModuleVerifyTest, ForwardSupertypeSameRecGroup) {
@@ -3407,7 +3448,7 @@ TEST_F(WasmModuleVerifyTest, ForwardSupertypeSameRecGroup) {
               WASM_STRUCT_DEF(FIELD_COUNT(1), STRUCT_FIELD(kI32Code, true)),
               WASM_STRUCT_DEF(FIELD_COUNT(1), STRUCT_FIELD(kI32Code, true)))};
   ModuleResult result = DecodeModule(base::ArrayVector(data));
-  EXPECT_NOT_OK(result, "type 0: forward-declared supertype 0");
+  EXPECT_NOT_OK(result, "type 0: invalid supertype 0");
 }
 
 TEST_F(WasmModuleVerifyTest, IllegalPackedFields) {
@@ -3420,7 +3461,6 @@ TEST_F(WasmModuleVerifyTest, IllegalPackedFields) {
 }
 
 TEST_F(WasmModuleVerifyTest, Memory64DataSegment) {
-  WASM_FEATURE_SCOPE(memory64);
   for (bool enable_memory64 : {false, true}) {
     for (bool use_memory64 : {false, true}) {
       uint8_t const_opcode = use_memory64 ? kExprI64Const : kExprI32Const;
@@ -3470,6 +3510,68 @@ TEST_F(WasmModuleVerifyTest, InvalidSharedGlobal) {
       "invalid global flags 0x3 (enable via --experimental-wasm-shared)");
 }
 
+TEST_F(WasmModuleVerifyTest, ContTypesBasic) {
+  WASM_FEATURE_SCOPE(wasmfx);
+  // Test a fairly generic cont pattern
+  static const uint8_t cont_group[] = {
+      SECTION(Type,            // --
+              ENTRY_COUNT(1),  // one group, four entries
+              kWasmRecursiveTypeGroupCode, ENTRY_COUNT(4), SIG_ENTRY_i_k,
+              SIG_ENTRY_k_i, CONT_ENTRY(0), CONT_ENTRY(1))};
+
+  EXPECT_VERIFIES(cont_group);
+}
+
+TEST_F(WasmModuleVerifyTest, ContTypesNonFunc) {
+  WASM_FEATURE_SCOPE(wasmfx);
+  // Invalid cont type definition: must reference a function type
+  static const uint8_t bad_cont_group[] = {SECTION(
+      Type, ENTRY_COUNT(2), WASM_STRUCT_DEF(FIELD_COUNT(0)), CONT_ENTRY(0))};
+
+  EXPECT_FAILURE(bad_cont_group);
+}
+
+TEST_F(WasmModuleVerifyTest, ContTypesSubtype) {
+  WASM_FEATURE_SCOPE(wasmfx);
+  // Subtyping of continuation types
+  static const uint8_t cont_sub_group[] = {
+      SECTION(Type,                                         // --
+              ENTRY_COUNT(2),                               // two groups
+              kWasmRecursiveTypeGroupCode, ENTRY_COUNT(4),  // --
+              SIG_ENTRY_i_k,                                // --
+              SIG_ENTRY_k_i,                                // --
+              kWasmSubtypeCode, 0,           // 0 supertypes, non-final
+              CONT_ENTRY(0), CONT_ENTRY(1),  // --
+              kWasmRecursiveTypeGroupCode, ENTRY_COUNT(1),  // --
+              // one supertype which is a cont type
+              kWasmSubtypeCode, 1, 2, CONT_ENTRY(0))};  // --
+  EXPECT_VERIFIES(cont_sub_group);
+}
+
+TEST_F(WasmModuleVerifyTest, ContTypesNotSubtype) {
+  WASM_FEATURE_SCOPE(wasmfx);
+  // Continuation types must subtype other continuation types
+  static const uint8_t cont_bad_sub_group[] = {SECTION(
+      Type,                                         // --
+      ENTRY_COUNT(2),                               // two groups
+      kWasmRecursiveTypeGroupCode, ENTRY_COUNT(2),  // --
+      SIG_ENTRY_i_k, CONT_ENTRY(0), kWasmRecursiveTypeGroupCode, ENTRY_COUNT(1),
+      kWasmSubtypeCode, 1, 0,  // supertype count, invalid super
+      CONT_ENTRY(0))};
+  EXPECT_FAILURE(cont_bad_sub_group);
+
+  static const uint8_t wrong_cont_sub_group[] = {SECTION(
+      Type,                                         // --
+      ENTRY_COUNT(2),                               // two groups
+      kWasmRecursiveTypeGroupCode, ENTRY_COUNT(4),  // --
+      SIG_ENTRY_i_k, SIG_ENTRY_k_i, kWasmSubtypeCode,
+      0,  // 0 supertypes, non-final
+      CONT_ENTRY(0), CONT_ENTRY(1), kWasmRecursiveTypeGroupCode, ENTRY_COUNT(1),
+      kWasmSubtypeCode, 1, 2,  // referenced function not subtype of super
+      CONT_ENTRY(1))};
+  EXPECT_FAILURE(wrong_cont_sub_group);
+}
+
 #undef EXPECT_INIT_EXPR
 #undef EXPECT_INIT_EXPR_FAIL
 #undef WASM_INIT_EXPR_I32V_1
@@ -3489,6 +3591,8 @@ TEST_F(WasmModuleVerifyTest, InvalidSharedGlobal) {
 #undef EMPTY_BODY
 #undef NOP_BODY
 #undef SIG_ENTRY_i_i
+#undef SIG_ENTRY_i_k
+#undef SIG_ENTRY_k_i
 #undef UNKNOWN_SECTION
 #undef ADD_COUNT
 #undef SECTION
